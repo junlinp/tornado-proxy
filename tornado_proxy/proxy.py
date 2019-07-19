@@ -37,7 +37,11 @@ import tornado.iostream
 import tornado.web
 import tornado.httpclient
 import tornado.httputil
-
+from tornado import gen
+import asyncio
+import re
+import os
+logging.basicConfig(level= logging.DEBUG)
 logger = logging.getLogger('tornado_proxy')
 
 __all__ = ['ProxyHandler', 'run_proxy']
@@ -54,7 +58,7 @@ def parse_proxy(proxy):
     return proxy_parsed.hostname, proxy_parsed.port
 
 
-def fetch_request(url, callback, **kwargs):
+async def fetch_request(url, callback, **kwargs):
     proxy = get_proxy(url)
     if proxy:
         logger.debug('Forward request via upstream proxy %s', proxy)
@@ -66,8 +70,21 @@ def fetch_request(url, callback, **kwargs):
 
     req = tornado.httpclient.HTTPRequest(url, **kwargs)
     client = tornado.httpclient.AsyncHTTPClient()
-    client.fetch(req, callback, raise_error=False)
+    response = await client.fetch(req, raise_error = False)
+    callback(response)
 
+def bilibili_process(url, response):
+    if not os.path.exists("./bilibili"):
+        os.mkdir("./bilibili")
+    matchs = re.match("av[0-9]+", url)
+    av_code = matchs.group()[0]
+    with open("./bilibili/" + av_code + ".flv", "wb") as f:
+        f.write(response.body())
+
+def other_process(url, response):
+    matchs = re.match("www.bilibili.com/video/av[0-9]?.*", url)
+    if matchs:
+        bilibili_process(url, response)
 
 class ProxyHandler(tornado.web.RequestHandler):
     SUPPORTED_METHODS = ['GET', 'POST', 'CONNECT']
@@ -75,17 +92,20 @@ class ProxyHandler(tornado.web.RequestHandler):
     def compute_etag(self):
         return None # disable tornado Etag
 
-    @tornado.web.asynchronous
-    def get(self):
+
+    async def get(self):
         logger.debug('Handle %s request to %s', self.request.method,
                      self.request.uri)
-
+        print('Handle %s request to %s' % (self.request.method, self.request.uri))
         def handle_response(response):
             if (response.error and not
                     isinstance(response.error, tornado.httpclient.HTTPError)):
                 self.set_status(500)
                 self.write('Internal server error:\n' + str(response.error))
             else:
+                print(self.request.uri)
+                other_process(self.request.uri, response)
+
                 self.set_status(response.code, response.reason)
                 self._headers = tornado.httputil.HTTPHeaders() # clear tornado default header
                 
@@ -104,7 +124,7 @@ class ProxyHandler(tornado.web.RequestHandler):
         try:
             if 'Proxy-Connection' in self.request.headers:
                 del self.request.headers['Proxy-Connection'] 
-            fetch_request(
+            await fetch_request(
                 self.request.uri, handle_response,
                 method=self.request.method, body=body,
                 headers=self.request.headers, follow_redirects=False,
@@ -117,11 +137,9 @@ class ProxyHandler(tornado.web.RequestHandler):
                 self.write('Internal server error:\n' + str(e))
                 self.finish()
 
-    @tornado.web.asynchronous
     def post(self):
         return self.get()
 
-    @tornado.web.asynchronous
     def connect(self):
         logger.debug('Start CONNECT to %s', self.request.uri)
         host, port = self.request.uri.split(':')
