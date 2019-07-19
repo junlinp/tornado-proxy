@@ -29,7 +29,7 @@ import logging
 import os
 import sys
 import socket
-from urllib import parse as urlparse
+from urllib.parse import urlparse
 
 import tornado.httpserver
 import tornado.ioloop
